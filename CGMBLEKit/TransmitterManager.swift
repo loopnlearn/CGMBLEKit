@@ -22,7 +22,7 @@ public struct TransmitterManagerState: RawRepresentable, Equatable {
     
     public var shouldSyncToRemoteService: Bool
 
-    public init(transmitterID: String, shouldSyncToRemoteService: Bool = true) {
+    public init(transmitterID: String, shouldSyncToRemoteService: Bool = false) {
         self.transmitterID = transmitterID
         self.shouldSyncToRemoteService = shouldSyncToRemoteService
     }

@@ -9,7 +9,19 @@ import HealthKit
 import LoopKit
 import ShareClient
 import os.log
+import CommonCrypto
 
+extension String {
+    func sha1() -> String {
+        let data = Data(self.utf8)
+        var digest = [UInt8](repeating: 0, count:Int(CC_SHA1_DIGEST_LENGTH))
+        data.withUnsafeBytes {
+            _ = CC_SHA1($0.baseAddress, CC_LONG(data.count), &digest)
+        }
+        let hexBytes = digest.map { String(format: "%02hhx", $0) }
+        return hexBytes.joined()
+    }
+}
 
 public struct TransmitterManagerState: RawRepresentable, Equatable {
     public typealias RawValue = CGMManager.RawStateValue
@@ -301,6 +313,74 @@ public class TransmitterManager: TransmitterDelegate {
         logDeviceCommunication("Error: \(error)", type: .error)
     }
 
+    //Patch for detecting a new G6 sensor
+    private func detectNewSensor() {
+        do { // Silence all errors and return
+            if let latestReading = latestReading {
+                let date = latestReading.sessionStartDate
+                let tenDaysInSeconds = 864000.0
+                let timeIntervalSinceNow = date.timeIntervalSinceNow
+                let now = Date()
+
+                //Check that the sessionStartDate is reasonable
+                if timeIntervalSinceNow > -tenDaysInSeconds && date <= now {
+
+                    //Read the last date sent to nightscout
+                    let interval = UserDefaults.standard.double(forKey: "lastSessionStartDate")
+                    let lastsessionStartDate = Date(timeIntervalSinceReferenceDate: interval)
+
+                    //Check if the last value we sent to nightscout is not the same (with some margin for rounding errors)
+                    if abs(date.timeIntervalSince(lastsessionStartDate)) > 60 {
+                        let keychain = KeychainManager()
+                        let credentials = try keychain.getInternetCredentials(account: "NightscoutAPI")
+
+                        let formatter = ISO8601DateFormatter()
+                        formatter.timeZone = TimeZone(abbreviation: "UTC")
+                        let dateString = formatter.string(from: date)
+
+                        let json: [String: Any] = [
+                            "enteredBy": "Loop",
+                            "created_at": dateString,
+                            "eventType": "Sensor Start",
+                            "secret": credentials.password.sha1()
+                        ]
+
+                        guard var urlComponents = URLComponents(url: credentials.url, resolvingAgainstBaseURL: false) else {return }
+                        if urlComponents.path.hasSuffix("/") {
+                            urlComponents.path = String(urlComponents.path.dropLast())
+                        }
+                        urlComponents.path += "/api/v1/treatments.json"
+
+                        guard let apiURL = urlComponents.url else { return }
+
+                        var request = URLRequest(url: apiURL)
+                        request.httpMethod = "POST"
+                        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                        request.httpBody = try? JSONSerialization.data(withJSONObject: json)
+
+                        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+                            if let error = error {
+                                // Handle network error
+                                print("Error: \(error)")
+                                return
+                            }
+
+                            guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {
+                                // Handle server error
+                                print("Error: Invalid response")
+                                return
+                            }
+                            UserDefaults.standard.set(date.timeIntervalSinceReferenceDate, forKey: "lastSessionStartDate")
+                        }
+                        task.resume()
+                    }
+                }
+            }
+        } catch {
+            return
+        }
+    }
+
     public func transmitter(_ transmitter: Transmitter, didRead glucose: Glucose) {
         guard glucose != latestReading else {
             updateDelegate(with: .noData)
@@ -308,6 +388,8 @@ public class TransmitterManager: TransmitterDelegate {
         }
 
         latestReading = glucose
+
+        detectNewSensor()
 
         logDeviceCommunication("New reading: \(glucose.readDate)", type: .receive)
 
